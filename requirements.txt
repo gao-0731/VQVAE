@@ -9,3 +9,5 @@ pycparser==2.19
 six==1.12.0
 torch==1.1.0
 torchvision==0.2.1
+pydicom==1.2.2
+
