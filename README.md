@@ -62,3 +62,12 @@ To run the PixelCNN, simply type
 `python pixelcnn/gated_pixelcnn.py`
 
 as well as any parameters (see the argparse statements). The default dataset is `LATENT_BLOCK` which will only work if you have trained your VQ VAE and saved the latent representations.
+
+## running command
+docker run --gpus all -it   -v /mnt/d/Dataset_paper/normal:/app/data   -v /mnt/d/VQModelResults:/app/results   -p 6006:6006   my-vqvae-model   bash -c "
+    pip uninstall -y opencv && \
+    rm -rf /usr/local/lib/python3.10/dist-packages/cv2/ && \
+    pip install opencv-python-headless==4.9.0.80 && \
+    python3 main.py & \
+    tensorboard --logdir=./runs --bind_all --port=6006
+  "

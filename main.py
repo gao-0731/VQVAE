@@ -1,228 +1,133 @@
 import os
-import pydicom
 import numpy as np
 import torch
-import torch.nn as nn
-import torch.optim as optim
-import argparse
-from torch.utils.data import Dataset, DataLoader, random_split
+from torch.utils.data import Dataset, DataLoader
 from torchvision import transforms
+import torchvision.utils as vutils
+from torch.utils.tensorboard import SummaryWriter
+import pydicom
 from models.vqvae import VQVAE
 import utils
-import matplotlib.pyplot as plt
-from matplotlib.animation import FuncAnimation  # 实现实时更新
 
-# DICOM画像のカスタムデータセットクラス
+# =============================
+# 超参数设定（全部写死）
+# =============================
+batch_size = 64
+n_updates = 5000
+n_hiddens = 128
+n_residual_hiddens = 64
+n_residual_layers = 2
+embedding_dim = 128
+n_embeddings = 128
+beta = 0.25
+learning_rate = 1e-4
+log_interval = 50
+resize = 256
+save = True
+filename = "model_checkpoint"
+train_data_dir = "/app/data/train"
+val_data_dir = "/app/data/validation"
+
+# =============================
+# 设备与 TensorBoard 设置
+# =============================
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+writer = SummaryWriter(log_dir=f"./runs/vqvae_{filename}")
+
+# =============================
+# DICOM 数据集
+# =============================
 class DICOMDataset(Dataset):
-    def __init__(self, data_path):
-        self.data_path = data_path
-        self.dicom_files = []
-
-        # DICOMファイルを全てリストに追加
-        for root, dirs, files in os.walk(data_path):
-            for file in files:
-                if file.endswith('.dcm'):
-                    self.dicom_files.append(os.path.join(root, file))
+    def __init__(self, data_path, transform=None):
+        self.transform = transform
+        self.dicom_files = [os.path.join(root, file)
+                            for root, _, files in os.walk(data_path)
+                            for file in files if file.endswith('.dcm')]
 
     def __len__(self):
         return len(self.dicom_files)
 
     def __getitem__(self, idx):
         dicom_path = self.dicom_files[idx]
-        try:
-            ds = pydicom.dcmread(dicom_path)  # DICOMファイルの読み込み
-            image = ds.pixel_array.astype(np.float32)  # ピクセルデータの取得
+        ds = pydicom.dcmread(dicom_path)
+        image = ds.pixel_array.astype(np.float32)
+        image = np.clip(image, 0, 3072) / 3072.0
+        image = torch.tensor(image).unsqueeze(0)
+        return self.transform(image) if self.transform else image
 
-            # ピクセル値の処理（例：一定の閾値でクリッピング）
-            image[image >= 3072] = 3072
-            image[image <= -2000] = 0
-            image = image / 3072.0  # 正規化
+# =============================
+# 数据加载与变换
+# =============================
+transform = transforms.Compose([
+    transforms.ToPILImage(),
+    transforms.Resize((resize, resize)),
+    transforms.ToTensor()
+])
 
-            return image
-        except Exception as e:
-            print(f"Error reading DICOM file {dicom_path}: {e}")
-            return None
+train_loader = DataLoader(DICOMDataset(train_data_dir, transform),
+                          batch_size=batch_size, shuffle=True)
+val_loader = DataLoader(DICOMDataset(val_data_dir, transform),
+                        batch_size=batch_size, shuffle=False)
 
-parser = argparse.ArgumentParser()
+# =============================
+# 模型定义
+# =============================
+model = VQVAE(n_hiddens, n_residual_hiddens, n_residual_layers,
+              n_embeddings, embedding_dim, beta).to(device)
+optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate, amsgrad=True)
 
-"""
-Hyperparameters
-"""
-# timestamp = utils.readable_timestamp()
-
-parser.add_argument("--batch_size", type=int, default=64)
-parser.add_argument("--n_updates", type=int, default=5000)
-parser.add_argument("--n_hiddens", type=int, default=128)
-parser.add_argument("--n_residual_hiddens", type=int, default=64)
-parser.add_argument("--n_residual_layers", type=int, default=2)
-parser.add_argument("--embedding_dim", type=int, default=64128)
-parser.add_argument("--n_embeddings", type=int, default=128)
-parser.add_argument("--beta", type=float, default=.25)
-parser.add_argument("--learning_rate", type=float, default=1e-4)
-parser.add_argument("--log_interval", type=int, default=50)
-
-# データセットのパスを別々に指定
-parser.add_argument("--train_data_dir", type=str, default='/path/to/your/train_data')  # 学習データのパス
-parser.add_argument("--val_data_dir", type=str, default='/path/to/your/val_data')  # 検証データのパス
-parser.add_argument("--resize", type=int, default=256)  # 画像のリサイズサイズ
-
-# whether or not to save model
-parser.add_argument("-save", action="store_true")
-parser.add_argument("--filename",  type=str, default="model_checkpoint")
-
-args = parser.parse_args()
-
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-if args.save:
-    print(f'Results will be saved in ./results/vqvae_{args.filename}.pth')
-
-"""
-Load data and define batch data loaders
-"""
-# DICOMデータセットの読み込み（学習用）
-train_dataset = DICOMDataset(data_path=args.train_data_dir, transform=None)
-# DICOMデータセットの読み込み（検証用）
-val_dataset = DICOMDataset(data_path=args.val_data_dir, transform=None)
-
-# DataLoaderの設定
-train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True)
-val_loader = DataLoader(val_dataset, batch_size=args.batch_size, shuffle=False)
-
-"""
-Set up VQ-VAE model with components defined in ./models/ folder
-"""
-
-model = VQVAE(args.n_hiddens, args.n_residual_hiddens,
-              args.n_residual_layers, args.n_embeddings, args.embedding_dim, args.beta).to(device)
-
-"""
-Set up optimizer and training loop
-"""
-optimizer = optim.Adam(model.parameters(), lr=args.learning_rate, amsgrad=True)
-
-model.train()
-
-results = {
-    'n_updates': 0,
-    'recon_errors': [],
-    'loss_vals': [],
-    'perplexities': [],
-}
-
-# 検証の関数
-def evaluate():
-    model.eval()  # モデルを評価モードに変更
-    val_recon_errors = []
-    val_loss_vals = []
-    val_perplexities = []
-
-    with torch.no_grad():  # 勾配計算を無効にする
-        for x, _ in val_loader:
+# =============================
+# 验证函数
+# =============================
+def evaluate(step):
+    model.eval()
+    losses, perplexities = [], []
+    with torch.no_grad():
+        for x in val_loader:
             x = x.to(device)
-
-            # VQ-VAEモデルの出力
             embedding_loss, x_hat, perplexity = model(x)
             recon_loss = torch.mean((x_hat - x)**2)
-            loss = recon_loss + embedding_loss
+            losses.append((recon_loss + embedding_loss).item())
+            perplexities.append(perplexity.item())
 
-            # 結果を保存
-            val_recon_errors.append(recon_loss.cpu().detach().numpy())
-            val_loss_vals.append(loss.cpu().detach().numpy())
-            val_perplexities.append(perplexity.cpu().detach().numpy())
+    writer.add_scalar("Val/Loss", np.mean(losses), step)
+    writer.add_scalar("Val/Perplexity", np.mean(perplexities), step)
 
-    # 検証結果の平均
-    avg_val_recon_error = np.mean(val_recon_errors)
-    avg_val_loss = np.mean(val_loss_vals)
-    avg_val_perplexity = np.mean(val_perplexities)
+    sample = next(iter(val_loader)).to(device)
+    _, x_hat, _ = model(sample)
+    grid = vutils.make_grid(torch.cat([sample[:8], x_hat[:8]]), nrow=8, normalize=True)
+    writer.add_image("Val/Reconstruction", grid, step)
+    return np.mean(losses)
 
-    print(f'Validation Results - Recon Error: {avg_val_recon_error}, Loss: {avg_val_loss}, Perplexity: {avg_val_perplexity}')
-
-    return avg_val_loss  # 検証用の損失を返す
-
-
-# 准备绘图
-fig, ax = plt.subplots(3, 1, figsize=(10, 15))  # 3个子图
-ax[0].set_title('Reconstruction Error')
-ax[1].set_title('Loss')
-ax[2].set_title('Perplexity')
-ax[0].set_xlabel('Updates')
-ax[0].set_ylabel('Reconstruction Error')
-ax[1].set_xlabel('Updates')
-ax[1].set_ylabel('Loss')
-ax[2].set_xlabel('Updates')
-ax[2].set_ylabel('Perplexity')
-
-# 初始化空数据
-recon_error_line, = ax[0].plot([], [], label='Recon Error')
-loss_line, = ax[1].plot([], [], label='Loss')
-perplexity_line, = ax[2].plot([], [], label='Perplexity')
-
-# 设定更新范围
-x_data, recon_errors, loss_vals, perplexities = [], [], [], []
-
-def update_plot(i):
-    # 定期添加新的数据点到x轴和曲线
-    x_data.append(i)
-    recon_errors.append(np.mean(results["recon_errors"][-args.log_interval:]))
-    loss_vals.append(np.mean(results["loss_vals"][-args.log_interval:]))
-    perplexities.append(np.mean(results["perplexities"][-args.log_interval:]))
-
-    # 更新每条曲线的数据
-    recon_error_line.set_data(x_data, recon_errors)
-    loss_line.set_data(x_data, loss_vals)
-    perplexity_line.set_data(x_data, perplexities)
-
-    return recon_error_line, loss_line, perplexity_line
-
-
+# =============================
+# 训练主循环
+# =============================
 def train():
-    best_val_loss = float('inf')
-
-    # 初始化动画
-    ani = FuncAnimation(fig, update_plot, frames=args.n_updates, interval=100, blit=True)
-
-    for i in range(args.n_updates):
-        # 学习数据1个批次
-        (x, _) = next(iter(train_loader))
-        x = x.to(device)
+    best_loss = float("inf")
+    for i in range(n_updates):
+        model.train()
+        x = next(iter(train_loader)).to(device)
         optimizer.zero_grad()
-
-        # VQ-VAE模型输出
         embedding_loss, x_hat, perplexity = model(x)
         recon_loss = torch.mean((x_hat - x)**2)
         loss = recon_loss + embedding_loss
-
-        # 反向传播并更新模型
         loss.backward()
         optimizer.step()
 
-        # 记录结果
-        results["recon_errors"].append(recon_loss.cpu().detach().numpy())
-        results["perplexities"].append(perplexity.cpu().detach().numpy())
-        results["loss_vals"].append(loss.cpu().detach().numpy())
-        results["n_updates"] = i
+        # TensorBoard logging
+        writer.add_scalar("Train/Loss", loss.item(), i)
+        writer.add_scalar("Train/Reconstruction_Loss", recon_loss.item(), i)
+        writer.add_scalar("Train/Perplexity", perplexity.item(), i)
 
-        # 输出日志
-        if i % args.log_interval == 0:
-            if args.save:
-                utils.save_model_and_results(model, results, args.__dict__, args.filename)
+        if i % 500 == 0:
+            grid = vutils.make_grid(torch.cat([x[:8], x_hat[:8]]), nrow=8, normalize=True)
+            writer.add_image("Train/Reconstruction", grid, i)
 
-            print(f"[Update #{i}] Recon Error: {np.mean(results['recon_errors'][-args.log_interval:]):.4f}, "
-                  f"Loss: {np.mean(results['loss_vals'][-args.log_interval:]):.4f}, "
-                  f"Perplexity: {np.mean(results['perplexities'][-args.log_interval:]):.4f}")
-
-        # 定期进行验证
         if i % 100 == 0:
-            val_loss = evaluate()
-
-            # 如果验证损失改善，保存模型
-            if val_loss < best_val_loss:
-                best_val_loss = val_loss
-                if args.save:
-                    utils.save_model_and_results(model, results, args.__dict__, args.filename)
-
-    plt.show()  # 显示图形
+            val_loss = evaluate(i)
+            if save and val_loss < best_loss:
+                best_loss = val_loss
+                utils.save_model_and_results(model, {"n_updates": i}, vars(), filename)
 
 if __name__ == "__main__":
     train()
