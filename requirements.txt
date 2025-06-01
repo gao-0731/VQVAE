@@ -10,4 +10,4 @@ six==1.17.0
 pydicom==3.0.1
 opencv-python==4.9.0.80
 matplotlib==3.8.3
-
+pytorch_msssim

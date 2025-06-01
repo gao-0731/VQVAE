@@ -1,11 +1,28 @@
-
 import torch
 import torch.nn as nn
-import numpy as np
 from models.encoder import Encoder
-from models.quantizer import VectorQuantizer
 from models.decoder import Decoder
+from models.quantizer import VectorQuantizer
 
+# class VQVAE(nn.Module):
+#     def __init__(self, img_size=256, patch_size=16, emb_dim=128, num_embeddings=128, beta=0.25,
+#                  enc_layers=6, dec_layers=6, use_residual=True, n_res_layers=3, res_h_dim=64):
+#         super().__init__()
+#         self.encoder = Encoder(
+#             in_channels=1, emb_dim=emb_dim, patch_size=patch_size, img_size=img_size,
+#             num_layers=enc_layers, use_residual=use_residual,
+#             n_res_layers=n_res_layers, res_h_dim=res_h_dim
+#         )
+#         self.pre_quantization_conv = nn.Conv2d(
+#             num_embeddings, emb_dim, kernel_size=1, stride=1)
+#         self.quantizer = VectorQuantizer(num_embeddings, emb_dim, beta)
+#         # self.decoder = Decoder(
+#         #     out_channels=1, emb_dim=emb_dim, patch_size=patch_size, img_size=img_size,
+#         #     num_layers=dec_layers, use_residual=use_residual,
+#         #     n_res_layers=n_res_layers, res_h_dim=res_h_dim
+#         # )
+
+#         self.decoder = Decoder(emb_dim, num_embeddings, n_res_layers, res_h_dim)
 
 class VQVAE(nn.Module):
     def __init__(self, h_dim, res_h_dim, n_res_layers,
@@ -26,6 +43,11 @@ class VQVAE(nn.Module):
         else:
             self.img_to_embedding_map = None
 
+    # def forward(self, x):
+    #     z_e = self.encoder(x)
+    #     loss, z_q, perplexity, _, _ = self.quantizer(z_e)
+    #     x_recon = self.decoder(z_q)
+    #     return loss, x_recon, perplexity
     def forward(self, x, verbose=False):
 
         z_e = self.encoder(x)

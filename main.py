@@ -8,12 +8,13 @@ from torch.utils.tensorboard import SummaryWriter
 import pydicom
 from models.vqvae import VQVAE
 import utils
+from pytorch_msssim import ssim, ms_ssim, SSIM, MS_SSIM
 
 # =============================
 # 超参数设定（全部写死）
 # =============================
-batch_size = 64
-n_updates = 5000
+batch_size = 128
+n_updates = 150000
 n_hiddens = 128
 n_residual_hiddens = 64
 n_residual_layers = 2
@@ -22,7 +23,7 @@ n_embeddings = 128
 beta = 0.25
 learning_rate = 1e-4
 log_interval = 50
-resize = 256
+resize = 192
 save = True
 filename = "model_checkpoint"
 train_data_dir = "/app/data/train"
@@ -72,8 +73,18 @@ val_loader = DataLoader(DICOMDataset(val_data_dir, transform),
 # =============================
 # 模型定义
 # =============================
-model = VQVAE(n_hiddens, n_residual_hiddens, n_residual_layers,
-              n_embeddings, embedding_dim, beta).to(device)
+model = VQVAE(
+    img_size=192,
+    patch_size=4,
+    emb_dim=128,
+    num_embeddings=128,
+    beta=0.25,
+    enc_layers=2,
+    dec_layers=6,
+    use_residual=True,
+    n_res_layers=2,
+    res_h_dim=64
+).to(device)
 optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate, amsgrad=True)
 
 # =============================
@@ -87,7 +98,9 @@ def evaluate(step):
             x = x.to(device)
             embedding_loss, x_hat, perplexity = model(x)
             recon_loss = torch.mean((x_hat - x)**2)
-            losses.append((recon_loss + embedding_loss).item())
+            ms_ssim_module = MS_SSIM(data_range=1, size_average=True, channel=1)
+            ms_ssim_error = 1 - ms_ssim_module(x, x_hat)
+            losses.append((recon_loss + embedding_loss + ms_ssim_error).item())
             perplexities.append(perplexity.item())
 
     writer.add_scalar("Val/Loss", np.mean(losses), step)
@@ -107,10 +120,13 @@ def train():
     for i in range(n_updates):
         model.train()
         x = next(iter(train_loader)).to(device)
+
         optimizer.zero_grad()
         embedding_loss, x_hat, perplexity = model(x)
-        recon_loss = torch.mean((x_hat - x)**2)
-        loss = recon_loss + embedding_loss
+        recon_loss = torch.mean((x_hat - x) ** 2)
+        ms_ssim_module = MS_SSIM(data_range=1, size_average=True, channel=1)
+        ms_ssim_error = 1 - ms_ssim_module(x, x_hat)
+        loss = recon_loss + embedding_loss + ms_ssim_error
         loss.backward()
         optimizer.step()
 
@@ -123,11 +139,22 @@ def train():
             grid = vutils.make_grid(torch.cat([x[:8], x_hat[:8]]), nrow=8, normalize=True)
             writer.add_image("Train/Reconstruction", grid, i)
 
-        if i % 100 == 0:
+        # === 10000イテレーションごとに保存・ベスト更新 ===
+        if i % 10000 == 0 and i != 0:
             val_loss = evaluate(i)
-            if save and val_loss < best_loss:
-                best_loss = val_loss
-                utils.save_model_and_results(model, {"n_updates": i}, vars(), filename)
+
+            # スナップショットとして保存（例: model_checkpoint_iter10000.pth）
+            if save:
+                utils.save_model_and_results(
+                    model, {"n_updates": i}, vars(), f"{filename}_iter{i}"
+                )
+
+                # ベストモデルとして保存（例: model_checkpoint_best.pth）
+                if val_loss < best_loss:
+                    best_loss = val_loss
+                    utils.save_model_and_results(
+                        model, {"n_updates": i}, vars(), f"{filename}_best"
+                    )
 
 if __name__ == "__main__":
     train()
