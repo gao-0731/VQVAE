@@ -71,3 +71,11 @@ docker run --gpus all -it   -v /mnt/d/Dataset_paper/normal:/app/data   -v /mnt/d
     python3 main.py & \
     tensorboard --logdir=./runs --bind_all --port=6006
   "
+
+docker run --gpus all -it   -v /mnt/d/Dataset_paper/normal:/app/data   -v /mnt/d/VQModelResults:/app/results   -p 6006:6006   my-vqvae-model   bash -c "
+    pip uninstall -y opencv && \
+    rm -rf /usr/local/lib/python3.10/dist-packages/cv2/ && \
+    pip install opencv-python-headless==4.9.0.80 && \
+    python3 eval_cnn.py & \
+    tensorboard --logdir=./runs --bind_all --port=6006
+    "

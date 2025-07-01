@@ -8,7 +8,7 @@ from pytorch_msssim import MS_SSIM
 import pydicom
 from models.vqvae import VQVAE
 from torch.utils.tensorboard import SummaryWriter
-from main_cnn import DICOMDataset  # DICOMDatasetをmain.pyから利用
+from main import DICOMDataset  # DICOMDatasetをmain.pyから利用
 import matplotlib.pyplot as plt
 
 
@@ -19,7 +19,7 @@ resize = 256
 batch_size = 16
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 val_data_dir = "/app/data/temp"
-model_path = "./Result/vqvae_data_model_checkpoint_iter20000.pth"
+model_path = "./Result/vqvae_data_model_checkpoint_best-most-iter.pth"
 save_dir = "./results/reconstruction"
 os.makedirs(save_dir, exist_ok=True)
 
@@ -40,8 +40,18 @@ val_loader = DataLoader(
 # =============================
 # モデルの構築と読み込み
 # =============================
-model = VQVAE(h_dim=128, res_h_dim=64, n_res_layers=2,
-              n_embeddings=128, embedding_dim=128, beta=0.25).to(device)
+model = VQVAE(
+    img_size=256,
+    patch_size=4,
+    emb_dim=[1024, 512, 256, 128],
+    num_embeddings=128,
+    beta=0.25,
+    enc_layers=8,
+    dec_layers=6,
+    use_residual=False,
+    n_res_layers=2,
+    res_h_dim=64
+).to(device)
 
 checkpoint = torch.load(model_path, map_location=device)
 model.load_state_dict(checkpoint["model"])
@@ -81,7 +91,7 @@ with torch.no_grad():
             rec = x_hat[i].repeat(3, 1, 1) if x_hat[i].shape[0] == 1 else x_hat[i]
 
             save_image(ori, f"{save_dir}/step{step:03d}_img{i:02d}_input.png", normalize=True)
-            save_image(rec, f"{save_dir}/step{step:03d}_img{i:02d}_recon.png", normalize=False)
+            save_image(rec, f"{save_dir}/step{step:03d}_img{i:02d}_recon.png", normalize=True)
 
             # ori = x[i]  # ← repeatしない
             # rec = x_hat[i]

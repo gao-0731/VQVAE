@@ -13,8 +13,8 @@ from pytorch_msssim import ssim, ms_ssim, SSIM, MS_SSIM
 # =============================
 # 超参数设定（全部写死）
 # =============================
-batch_size = 128
-n_updates = 150000
+batch_size = 16
+n_updates = 200000
 n_hiddens = 128
 n_residual_hiddens = 64
 n_residual_layers = 2
@@ -23,7 +23,7 @@ n_embeddings = 128
 beta = 0.25
 learning_rate = 1e-4
 log_interval = 50
-resize = 192
+resize = 256
 save = True
 filename = "model_checkpoint"
 train_data_dir = "/app/data/train"
@@ -74,14 +74,14 @@ val_loader = DataLoader(DICOMDataset(val_data_dir, transform),
 # 模型定义
 # =============================
 model = VQVAE(
-    img_size=192,
+    img_size=256,
     patch_size=4,
-    emb_dim=128,
+    emb_dim=[1024, 512, 256, 128],
     num_embeddings=128,
     beta=0.25,
-    enc_layers=2,
+    enc_layers=8,
     dec_layers=6,
-    use_residual=True,
+    use_residual=False,
     n_res_layers=2,
     res_h_dim=64
 ).to(device)
