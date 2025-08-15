@@ -79,3 +79,5 @@ docker run --gpus all -it   -v /mnt/d/Dataset_paper/normal:/app/data   -v /mnt/d
     python3 eval_cnn.py & \
     tensorboard --logdir=./runs --bind_all --port=6006
     "
+
+python3 main.py & tensorboard --logdir=./runs --bind_all --port=6006

@@ -9,7 +9,7 @@ import torch.nn as nn
 
 class Encoder(nn.Module):
     def __init__(self, in_channels=1, emb_dims=[128, 64, 32], patch_size=16, img_size=256,
-                 num_layers=6, num_heads=8, use_residual=True, n_res_layers=3, res_h_dim=64):
+                 num_layers=6, num_heads=32, use_residual=True, n_res_layers=3, res_h_dim=64):
         super().__init__()
         # emb_dims: [128, 64, 32] のように段階的に減らす
 

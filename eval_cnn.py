@@ -19,7 +19,7 @@ resize = 256
 batch_size = 16
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 val_data_dir = "/app/data/temp"
-model_path = "./Result/vqvae_data_model_checkpoint_best-most-iter.pth"
+model_path = "./Result/vqvae_data_model_checkpoint_best.pth"
 save_dir = "./results/reconstruction"
 os.makedirs(save_dir, exist_ok=True)
 
@@ -43,7 +43,7 @@ val_loader = DataLoader(
 model = VQVAE(
     img_size=256,
     patch_size=4,
-    emb_dim=[1024, 512, 256, 128],
+    emb_dim=[512, 256, 128],
     num_embeddings=128,
     beta=0.25,
     enc_layers=8,

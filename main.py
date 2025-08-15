@@ -13,7 +13,7 @@ from pytorch_msssim import ssim, ms_ssim, SSIM, MS_SSIM
 # =============================
 # 超参数设定（全部写死）
 # =============================
-batch_size = 16
+batch_size = 8
 n_updates = 200000
 n_hiddens = 128
 n_residual_hiddens = 64
@@ -76,7 +76,7 @@ val_loader = DataLoader(DICOMDataset(val_data_dir, transform),
 model = VQVAE(
     img_size=256,
     patch_size=4,
-    emb_dim=[1024, 512, 256, 128],
+    emb_dim=[512, 256, 128],
     num_embeddings=128,
     beta=0.25,
     enc_layers=8,
@@ -155,6 +155,7 @@ def train():
                     utils.save_model_and_results(
                         model, {"n_updates": i}, vars(), f"{filename}_best"
                     )
+    print(f"Training completed. Best validation loss: {best_loss:.4f}")
 
 if __name__ == "__main__":
     train()
