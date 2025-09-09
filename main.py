@@ -8,19 +8,13 @@ from torch.utils.tensorboard import SummaryWriter
 import pydicom
 from models.vqvae import VQVAE
 import utils
-from pytorch_msssim import ssim, ms_ssim, SSIM, MS_SSIM
+from pytorch_msssim import MS_SSIM
 
 # =============================
 # 超参数设定（全部写死）
 # =============================
-batch_size = 8
+batch_size = 32
 n_updates = 200000
-n_hiddens = 128
-n_residual_hiddens = 64
-n_residual_layers = 2
-embedding_dim = 128
-n_embeddings = 128
-beta = 0.25
 learning_rate = 1e-4
 log_interval = 50
 resize = 256
@@ -76,11 +70,10 @@ val_loader = DataLoader(DICOMDataset(val_data_dir, transform),
 model = VQVAE(
     img_size=256,
     patch_size=4,
-    emb_dim=[512, 256, 128],
+    emb_dim=[256, 128, 64],
     num_embeddings=128,
     beta=0.25,
     enc_layers=8,
-    dec_layers=6,
     use_residual=False,
     n_res_layers=2,
     res_h_dim=64

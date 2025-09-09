@@ -1,45 +1,52 @@
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
-import numpy as np
+from models.patch_embedding import PatchEmbedding
 from models.residual import ResidualStack
-
+import numpy as np
+import torch
+import torch.nn as nn
 
 class Encoder(nn.Module):
-    """
-    This is the q_theta (z|x) network. Given a data sample x q_theta 
-    maps to the latent space x -> z.
+    def __init__(self, in_channels=1, emb_dims=[128, 64, 32], patch_size=16, img_size=256,
+                 num_layers=6, num_heads=8, use_residual=True, n_res_layers=3, res_h_dim=64):
+        super().__init__()
 
-    For a VQ VAE, q_theta outputs parameters of a categorical distribution.
+        self.patch_embed = PatchEmbedding(in_channels, emb_dims[0], patch_size, img_size)
+        self.transformer_blocks = nn.ModuleList()
+        self.linear_layers = nn.ModuleList()
+        self.num_stages = len(emb_dims)
+        self.emb_dims = emb_dims
 
-    Inputs:
-    - in_dim : the input dimension
-    - h_dim : the hidden layer dimension
-    - res_h_dim : the hidden dimension of the residual block
-    - n_res_layers : number of layers to stack
+        n_layers_per_stage = num_layers // (self.num_stages)
+        for i in range(self.num_stages):
+            d_model = emb_dims[i]
+            encoder_layer = nn.TransformerEncoderLayer(
+                d_model=d_model, nhead=num_heads,
+                dim_feedforward=d_model * 4, batch_first=True)
+            # 複数層まとめて
+            block = nn.TransformerEncoder(encoder_layer, num_layers=n_layers_per_stage)
+            self.transformer_blocks.append(block)
 
-    """
+            # 最終段以外は次元圧縮線形層
+            if i < self.num_stages - 1:
+                self.linear_layers.append(nn.Linear(d_model, emb_dims[i+1]))
 
-    def __init__(self, in_dim, h_dim, n_res_layers, res_h_dim):
-        super(Encoder, self).__init__()
-        kernel = 4
-        stride = 2
-        self.conv_stack = nn.Sequential(
-            nn.Conv2d(in_dim, h_dim // 2, kernel_size=kernel,
-                      stride=stride, padding=1),
-            nn.ReLU(),
-            nn.Conv2d(h_dim // 2, h_dim, kernel_size=kernel,
-                      stride=stride, padding=1),
-            nn.ReLU(),
-            nn.Conv2d(h_dim, h_dim, kernel_size=kernel-1,
-                      stride=stride-1, padding=1),
-            ResidualStack(
-                h_dim, h_dim, res_h_dim, n_res_layers)
-
-        )
+        self.grid_size = img_size // patch_size
+        self.use_residual = use_residual
+        if use_residual:
+            self.res_stack = ResidualStack(emb_dims[-1], emb_dims[-1], res_h_dim, n_res_layers)
 
     def forward(self, x):
-        return self.conv_stack(x)
+        x, (H, W) = self.patch_embed(x)   # [B, HW, D0]
+        for i in range(self.num_stages):
+            x = self.transformer_blocks[i](x)
+            if i < self.num_stages - 1:
+                x = self.linear_layers[i](x)  # 次元圧縮
+        # [B, HW, D_last]
+        x = x.transpose(1, 2).view(-1, self.emb_dims[-1], H, W)
+        if self.use_residual:
+            x = self.res_stack(x)
+        return x
 
 
 if __name__ == "__main__":
