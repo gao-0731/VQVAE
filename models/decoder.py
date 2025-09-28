@@ -6,32 +6,31 @@ import numpy as np
 from models.residual import ResidualStack
 
 class Decoder(nn.Module):
-
     def __init__(self, in_dim, h_dim, n_res_layers, res_h_dim):
         super(Decoder, self).__init__()
         kernel = 4
         stride = 2
 
         self.inverse_conv_stack = nn.Sequential(
-            nn.ConvTranspose2d(
-                in_dim, h_dim, kernel_size=kernel-1, stride=stride-1, padding=1),
+            nn.ConvTranspose2d(in_dim, h_dim, kernel_size=3, stride=1, padding=1),   # 16→16
             ResidualStack(h_dim, h_dim, res_h_dim, n_res_layers),
-            nn.ConvTranspose2d(h_dim, h_dim // 2,
-                               kernel_size=kernel, stride=stride, padding=1),
+
+            nn.ConvTranspose2d(h_dim, h_dim, kernel_size=kernel, stride=stride, padding=1),  # 16→32
             nn.ReLU(),
-            nn.ConvTranspose2d(h_dim//2, h_dim // 4,
-                               kernel_size=kernel, stride=stride, padding=1),
+
+            nn.ConvTranspose2d(h_dim, h_dim//2, kernel_size=kernel, stride=stride, padding=1), # 32→64
             nn.ReLU(),
-            nn.ConvTranspose2d(h_dim//4, h_dim //8,
-                               kernel_size=kernel, stride=stride, padding=1),
+
+            nn.ConvTranspose2d(h_dim//2, h_dim//4, kernel_size=kernel, stride=stride, padding=1), # 64→128
             nn.ReLU(),
-            nn.ConvTranspose2d(h_dim//8, 1, kernel_size=kernel,
-                               stride=stride, padding=1),
+
+            nn.ConvTranspose2d(h_dim//4, 1, kernel_size=kernel, stride=stride, padding=1), # 128→256
             nn.Sigmoid()
         )
 
     def forward(self, x):
         return self.inverse_conv_stack(x)
+
 
 if __name__ == "__main__":
     # random data
