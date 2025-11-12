@@ -13,7 +13,7 @@ from pytorch_msssim import MS_SSIM
 # =============================
 # 超参数设定（全部写死）
 # =============================
-batch_size = 32
+batch_size = 16
 n_updates = 200000
 learning_rate = 1e-4
 log_interval = 50
@@ -70,7 +70,7 @@ val_loader = DataLoader(DICOMDataset(val_data_dir, transform),
 model = VQVAE(
     img_size=256,
     patch_size=4,
-    emb_dim=[256, 128, 64],
+    emb_dim=[512, 256, 128],
     num_embeddings=128,
     beta=0.25,
     enc_layers=8,
