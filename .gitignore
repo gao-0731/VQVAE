@@ -6,3 +6,5 @@ playground*
 results/
 .ipynb_checkpoints/
 samples/
+Result/
+runs/
