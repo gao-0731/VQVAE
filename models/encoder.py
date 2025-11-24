@@ -1,54 +1,56 @@
-
+# models/encoder.py
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
-import numpy as np
-from models.residual import ResidualStack
+
+from models.encoder_cnn import EncoderCNN
+from models.bottleneck_vit import BottleneckViT
 
 
 class Encoder(nn.Module):
     """
-    This is the q_theta (z|x) network. Given a data sample x q_theta 
-    maps to the latent space x -> z.
-
-    For a VQ VAE, q_theta outputs parameters of a categorical distribution.
-
-    Inputs:
-    - in_dim : the input dimension
-    - h_dim : the hidden layer dimension
-    - res_h_dim : the hidden dimension of the residual block
-    - n_res_layers : number of layers to stack
-
+    对外暴露给 VQVAE 的 Encoder
+    内部结构：CNN → ViT
+    输出: (B, h_dim, 64, 64)
     """
+    def __init__(
+        self,
+        in_dim: int,
+        h_dim: int,
+        n_res_layers: int,
+        res_h_dim: int,
+        vit_layers: int = 2,
+        vit_heads: int = 8,
+        vit_dim_ff: int | None = None,
+        vit_dropout: float = 0.0,
+    ):
+        super().__init__()
 
-    def __init__(self, in_dim, h_dim, n_res_layers, res_h_dim):
-        super(Encoder, self).__init__()
-        kernel = 4
-        stride = 2
-        self.conv_stack = nn.Sequential(
-            nn.Conv2d(in_dim, h_dim // 2, kernel_size=kernel,
-                      stride=stride, padding=1),
-            nn.ReLU(),
-            nn.Conv2d(h_dim // 2, h_dim, kernel_size=kernel,
-                      stride=stride, padding=1),
-            nn.ReLU(),
-            nn.Conv2d(h_dim, h_dim, kernel_size=kernel-1,
-                      stride=stride-1, padding=1),
-            ResidualStack(
-                h_dim, h_dim, res_h_dim, n_res_layers)
+        self.cnn = EncoderCNN(
+            in_dim=in_dim,
+            h_dim=h_dim,
+            n_res_layers=n_res_layers,
+            res_h_dim=res_h_dim,
+        )
 
+        self.vit = BottleneckViT(
+            channels=h_dim,
+            num_layers=vit_layers,
+            num_heads=vit_heads,
+            dim_feedforward=vit_dim_ff,
+            dropout=vit_dropout,
+            use_residual=True,
         )
 
     def forward(self, x):
-        return self.conv_stack(x)
+        z = self.cnn(x)   # (B, h_dim, 64, 64)
+        z = self.vit(z)   # (B, h_dim, 64, 64)
+        return z
 
 
 if __name__ == "__main__":
-    # random data
-    x = np.random.random_sample((3, 40, 40, 200))
-    x = torch.tensor(x).float()
-
-    # test encoder
-    encoder = Encoder(40, 128, 3, 64)
-    encoder_out = encoder(x)
-    print('Encoder out shape:', encoder_out.shape)
+    # simple test
+    x = torch.randn(2, 1, 256, 256)
+    net = Encoder(1, 128, 3, 64)
+    z = net(x)
+    print("input :", x.shape)
+    print("latent:", z.shape)  # (2, 128, 64, 64)
