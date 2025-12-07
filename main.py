@@ -13,7 +13,7 @@ import utils
 # 超参数设定（全部写死）
 # =============================
 batch_size = 64
-n_updates = 5000
+n_updates = 150000
 n_hiddens = 128
 n_residual_hiddens = 64
 n_residual_layers = 2
@@ -123,11 +123,23 @@ def train():
             grid = vutils.make_grid(torch.cat([x[:8], x_hat[:8]]), nrow=8, normalize=True)
             writer.add_image("Train/Reconstruction", grid, i)
 
-        if i % 100 == 0:
+        # === 10000イテレーションごとに保存・ベスト更新 ===
+        if i % 10000 == 0 and i != 0:
             val_loss = evaluate(i)
-            if save and val_loss < best_loss:
-                best_loss = val_loss
-                utils.save_model_and_results(model, {"n_updates": i}, vars(), filename)
+
+            # スナップショットとして保存（例: model_checkpoint_iter10000.pth）
+            if save:
+                utils.save_model_and_results(
+                    model, {"n_updates": i}, vars(), f"{filename}_iter{i}"
+                )
+
+                # ベストモデルとして保存（例: model_checkpoint_best.pth）
+                if val_loss < best_loss:
+                    best_loss = val_loss
+                    utils.save_model_and_results(
+                        model, {"n_updates": i}, vars(), f"{filename}_best"
+                    )
+    print(f"Training completed. Best validation loss: {best_loss:.4f}")
 
 if __name__ == "__main__":
     train()
