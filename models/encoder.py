@@ -3,7 +3,7 @@ import torch
 import torch.nn as nn
 
 from models.encoder_cnn import EncoderCNN
-from models.bottleneck_vit import BottleneckViT
+from models.bottleneck import BottleneckViT
 
 
 class Encoder(nn.Module):

@@ -46,9 +46,9 @@ class EncoderCNN(nn.Module):
             ),
 
             ResidualStack(
-                in_channels=h_dim,
-                out_channels=h_dim,
-                hidden_channels=res_h_dim,
+                in_dim=h_dim,
+                h_dim=h_dim,
+                res_h_dim=res_h_dim,
                 n_res_layers=n_res_layers,
             ),
         )
