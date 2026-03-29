@@ -8,3 +8,6 @@ results/
 samples/
 Result/
 runs/
+pth_model/
+reconstruction_new/
+reconstruction_img/
