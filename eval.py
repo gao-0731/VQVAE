@@ -19,7 +19,7 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 # 路径
 val_data_dir = "/app/data/temp/abnormal"
-model_path = "./pth_model/vqvae_data_model_checkpoint190000_cnn_attention_embedding.pth"   # ⚠️改成你的新模型路径
+model_path = "./pth_model/vqvae_data_model_checkpoint_best_cnn_attention_emSpace_pos.pth"   # ⚠️改成你的新模型路径
 save_dir = "./results/reconstruction_new"
 os.makedirs(save_dir, exist_ok=True)
 

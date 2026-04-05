@@ -104,42 +104,52 @@ def evaluate(step):
 # =============================
 def train():
     best_loss = float("inf")
-    for i in range(n_updates):
+    step = 0
+
+    while step < n_updates:
         model.train()
-        x = next(iter(train_loader)).to(device)
-        optimizer.zero_grad()
-        embedding_loss, x_hat, perplexity = model(x)
-        recon_loss = torch.mean((x_hat - x)**2)
-        loss = recon_loss + embedding_loss
-        loss.backward()
-        optimizer.step()
 
-        # TensorBoard logging
-        writer.add_scalar("Train/Loss", loss.item(), i)
-        writer.add_scalar("Train/Reconstruction_Loss", recon_loss.item(), i)
-        writer.add_scalar("Train/Perplexity", perplexity.item(), i)
+        for x in train_loader:
+            x = x.to(device)
 
-        if i % 500 == 0:
-            grid = vutils.make_grid(torch.cat([x[:8], x_hat[:8]]), nrow=8, normalize=True)
-            writer.add_image("Train/Reconstruction", grid, i)
+            optimizer.zero_grad()
+            embedding_loss, x_hat, perplexity = model(x)
 
-        # === 10000イテレーションごとに保存・ベスト更新 ===
-        if i % 10000 == 0 and i != 0:
-            val_loss = evaluate(i)
+            recon_loss = torch.mean((x_hat - x)**2)
+            loss = recon_loss + embedding_loss
 
-            # スナップショットとして保存（例: model_checkpoint_iter10000.pth）
-            if save:
-                utils.save_model_and_results(
-                    model, {"n_updates": i}, vars(), f"{filename}_iter{i}"
-                )
+            loss.backward()
+            optimizer.step()
 
-                # ベストモデルとして保存（例: model_checkpoint_best.pth）
-                if val_loss < best_loss:
-                    best_loss = val_loss
+            # ===== logging =====
+            writer.add_scalar("Train/Loss", loss.item(), step)
+            writer.add_scalar("Train/Reconstruction_Loss", recon_loss.item(), step)
+            writer.add_scalar("Train/Perplexity", perplexity.item(), step)
+
+            if step % 500 == 0:
+                grid = vutils.make_grid(torch.cat([x[:8], x_hat[:8]]), nrow=8, normalize=True)
+                writer.add_image("Train/Reconstruction", grid, step)
+
+            # ===== validation =====
+            if step % 10000 == 0 and step != 0:
+                val_loss = evaluate(step)
+
+                if save:
                     utils.save_model_and_results(
-                        model, {"n_updates": i}, vars(), f"{filename}_best"
+                        model, {"n_updates": step}, vars(), f"{filename}_iter{step}"
                     )
-    print(f"Training completed. Best validation loss: {best_loss:.4f}")
 
+                    if val_loss < best_loss:
+                        best_loss = val_loss
+                        utils.save_model_and_results(
+                            model, {"n_updates": step}, vars(), f"{filename}_best"
+                        )
+
+            step += 1
+            if step >= n_updates:
+                break
+
+    print(f"Training completed. Best validation loss: {best_loss:.4f}")
+    
 if __name__ == "__main__":
     train()
