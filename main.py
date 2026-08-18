@@ -61,11 +61,11 @@ beta = 0.25
 # =============================
 
 # 原来 0.25 太大，容易导致 reconstruction 块状崩坏
-mask_ratio = 0.10
-block_size = 8
+mask_ratio = 0.05
+block_size = 4
 
 # latent 是 64x64
-# block_size=8 对应原图大约 32x32 pixel
+# block_size=4 对应原图大约 64x64 pixel
 
 
 # =============================
@@ -321,7 +321,7 @@ for epoch in range(n_epochs):
             torch.abs(x_hat - x)
         )
 
-        recon_loss = masked_loss + 0.5 * full_loss
+        recon_loss = 0.3 * masked_loss + 0.5 * full_loss
 
         loss = recon_loss + embedding_loss
 
@@ -470,7 +470,7 @@ for epoch in range(n_epochs):
                 torch.abs(x_hat - x)
             )
 
-            recon_loss = masked_loss + 0.5 * full_loss
+            recon_loss = 0.3 * masked_loss + 1.0 * full_loss
 
             loss = recon_loss + embedding_loss
 
