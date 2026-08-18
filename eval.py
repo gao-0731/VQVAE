@@ -12,7 +12,6 @@ import torchvision.utils as vutils
 from torch.utils.tensorboard import SummaryWriter
 
 import pydicom
-from pytorch_msssim import ssim
 
 from models.vqvae import VQVAE
 
@@ -27,6 +26,8 @@ batch_size = 16
 device = torch.device(
     "cuda" if torch.cuda.is_available() else "cpu"
 )
+
+print("Using device:", device)
 
 
 # =============================
@@ -44,26 +45,41 @@ beta = 0.25
 
 
 # =============================
+# Mask Parameters
+# 必须和你最新训练一致
+# =============================
+
+mask_ratio = 0.05
+block_size = 4
+
+
+# =============================
 # Paths
 # =============================
 
 eval_data_dir = "/app/data/temp/abnormal"
 
-# 这里改成你想测试的 checkpoint
-model_path = "/app/results/vqvae_data_vqvae_ct_anomaly_epoch200.pth"
-# model_path = "/app/results/vqvae_data_vqvae_ct_anomaly_epoch100.pth"
-# model_path = "/app/results/vqvae_data_vqvae_ct_anomaly_final.pth"
+# 改成你最新训练出来的模型
+# 先用 final，如果效果不好再试 best
+model_path = "/app/results/vqvae_data_vqvae_ct_masked_block_stable_final-1.0.pth"
+
+# 也可以试：
+# model_path = "/app/results/vqvae_data_vqvae_ct_masked_block_stable_best.pth"
+# model_path = "/app/results/vqvae_data_vqvae_ct_masked_block_stable_epoch50.pth"
 
 checkpoint_name = os.path.basename(model_path).replace(".pth", "")
-
 eval_time = datetime.now().strftime("%Y%m%d_%H%M%S")
 
-save_dir = f"/app/results/reconstruction_{checkpoint_name}_{eval_time}"
+save_dir = f"/app/results/eval_masked_{checkpoint_name}_{eval_time}"
 os.makedirs(save_dir, exist_ok=True)
 
 writer = SummaryWriter(
-    log_dir=f"/app/runs/eval_{checkpoint_name}_{eval_time}"
+    log_dir=f"/app/runs/eval_masked_{checkpoint_name}_{eval_time}"
 )
+
+print("Eval data dir:", eval_data_dir)
+print("Model path:", model_path)
+print("Save dir:", save_dir)
 
 
 # =============================
@@ -85,6 +101,8 @@ class DICOMDataset(Dataset):
 
         self.dicom_files = sorted(self.dicom_files)
 
+        print(f"Loaded {len(self.dicom_files)} DICOM files from {data_path}")
+
     def __len__(self):
         return len(self.dicom_files)
 
@@ -92,9 +110,13 @@ class DICOMDataset(Dataset):
         dicom_path = self.dicom_files[idx]
 
         ds = pydicom.dcmread(dicom_path)
+
         image = ds.pixel_array.astype(np.float32)
 
+        # =============================
         # 必须和训练时一致
+        # 你现在训练用的是这个预处理
+        # =============================
         image = np.clip(image, 0, 3072)
         image = image / 3072.0
 
@@ -124,11 +146,9 @@ transform = transforms.Compose([
 
 dataset = DICOMDataset(
     eval_data_dir,
-    transform
+    transform=transform
 )
 
-print("==== DEBUG ====")
-print("Eval data dir:", eval_data_dir)
 print("Dataset size:", len(dataset))
 
 val_loader = DataLoader(
@@ -182,7 +202,8 @@ print("Loaded model:", model_path)
 def normalize_per_image(x):
     """
     x: [B, 1, H, W]
-    return: [B, 1, H, W], each image normalized to [0, 1]
+    return: [B, 1, H, W]
+    每张图单独 normalize 到 [0, 1]
     """
 
     x_norm = x.clone()
@@ -191,7 +212,10 @@ def normalize_per_image(x):
         img = x_norm[i]
         img_min = img.min()
         img_max = img.max()
-        x_norm[i] = (img - img_min) / (img_max - img_min + 1e-8)
+
+        x_norm[i] = (img - img_min) / (
+            img_max - img_min + 1e-8
+        )
 
     return x_norm
 
@@ -201,7 +225,9 @@ def normalize_per_image(x):
 # =============================
 
 losses = []
-recon_losses = []
+masked_losses = []
+full_losses = []
+embedding_losses = []
 perplexities = []
 
 with torch.no_grad():
@@ -212,49 +238,58 @@ with torch.no_grad():
         x = x.to(device)
 
         # =============================
-        # Forward
-        # mask=False:
-        # 先不要 test-time masking
-        # 重点看 q_distance_map
+        # Forward with masked inference
+        # 注意：这里必须 mask=True
         # =============================
 
-        embedding_loss, x_hat, perplexity, q_distance_map = model(
-            x,
-            mask=False
-        )
-
-        # =============================
-        # Loss
-        # =============================
-
-        l1_loss = torch.mean(
-            torch.abs(x_hat - x)
-        )
-
-        ssim_loss = 1 - ssim(
+        (
+            embedding_loss,
             x_hat,
+            perplexity,
+            q_distance_map,
+            image_mask
+        ) = model(
             x,
-            data_range=1.0
+            mask=True,
+            mask_ratio=mask_ratio,
+            block_size=block_size,
+            return_mask=True
         )
 
-        recon_loss = l1_loss + 0.1 * ssim_loss
+        # =============================
+        # Loss / Diff
+        # =============================
+
+        full_diff = torch.abs(x - x_hat)
+        masked_diff = full_diff * image_mask
+
+        masked_loss = masked_diff.sum() / (
+            image_mask.sum() + 1e-8
+        )
+
+        full_loss = torch.mean(full_diff)
+
+        recon_loss = 0.3 * masked_loss + 1.0 * full_loss
+
         total_loss = recon_loss + embedding_loss
 
         losses.append(total_loss.item())
-        recon_losses.append(recon_loss.item())
+        masked_losses.append(masked_loss.item())
+        full_losses.append(full_loss.item())
+        embedding_losses.append(embedding_loss.item())
         perplexities.append(perplexity.item())
 
         # =============================
-        # Pixel difference map
+        # Visualization
         # =============================
 
-        diff = torch.abs(x - x_hat)
-        diff_vis = normalize_per_image(diff)
+        full_diff_vis = normalize_per_image(full_diff)
+        masked_diff_vis = normalize_per_image(masked_diff)
 
         # =============================
         # Quantization distance map
         # q_distance_map: [B, 64, 64]
-        # upsample -> [B, 1, 256, 256]
+        # q_map: [B, 1, 256, 256]
         # =============================
 
         q_map = q_distance_map.unsqueeze(1)
@@ -270,11 +305,11 @@ with torch.no_grad():
 
         # =============================
         # Fusion score
-        # 可选：pixel diff + q distance
+        # masked_diff + qdistance
         # =============================
 
-        score_vis = 0.3 * diff_vis + 0.7 * q_vis
-        score_vis = normalize_per_image(score_vis)
+        score = 0.5 * masked_diff_vis + 0.5 * q_vis
+        score_vis = normalize_per_image(score)
 
         # =============================
         # Save individual images
@@ -283,7 +318,6 @@ with torch.no_grad():
         for i in range(x.size(0)):
 
             global_idx = step * batch_size + i
-
             base_name = f"img{global_idx:04d}"
 
             save_image(
@@ -299,8 +333,20 @@ with torch.no_grad():
             )
 
             save_image(
-                diff_vis[i],
-                f"{save_dir}/{base_name}_diff.png",
+                image_mask[i],
+                f"{save_dir}/{base_name}_mask.png",
+                normalize=False
+            )
+
+            save_image(
+                masked_diff_vis[i],
+                f"{save_dir}/{base_name}_masked_diff.png",
+                normalize=False
+            )
+
+            save_image(
+                full_diff_vis[i],
+                f"{save_dir}/{base_name}_full_diff.png",
                 normalize=False
             )
 
@@ -316,7 +362,6 @@ with torch.no_grad():
                 normalize=False
             )
 
-            # 保存原始路径，方便追踪
             with open(
                 f"{save_dir}/{base_name}_path.txt",
                 "w"
@@ -325,8 +370,15 @@ with torch.no_grad():
 
         # =============================
         # TensorBoard image grid
+        #
         # 行顺序：
-        # input / reconstruction / diff / qdistance / fusion score
+        # input
+        # reconstruction
+        # mask
+        # masked_diff
+        # full_diff
+        # qdistance
+        # score
         # =============================
 
         n_show = min(8, x.size(0))
@@ -335,22 +387,24 @@ with torch.no_grad():
             torch.cat([
                 x[:n_show],
                 x_hat[:n_show],
-                diff_vis[:n_show],
+                image_mask[:n_show],
+                masked_diff_vis[:n_show],
+                full_diff_vis[:n_show],
                 q_vis[:n_show],
                 score_vis[:n_show]
-            ]),
+            ], dim=0),
             nrow=n_show,
             normalize=True
         )
 
         writer.add_image(
-            "Eval/Input_Recon_Diff_QDistance_Score",
+            "Eval/Input_Recon_Mask_MaskedDiff_FullDiff_QDistance_Score",
             grid,
             step
         )
 
         # =============================
-        # TensorBoard scalars
+        # TensorBoard Scalars
         # =============================
 
         writer.add_scalar(
@@ -366,8 +420,14 @@ with torch.no_grad():
         )
 
         writer.add_scalar(
-            "Eval/Perplexity",
-            perplexity.item(),
+            "Eval/Masked_Loss",
+            masked_loss.item(),
+            step
+        )
+
+        writer.add_scalar(
+            "Eval/Full_Loss",
+            full_loss.item(),
             step
         )
 
@@ -377,10 +437,19 @@ with torch.no_grad():
             step
         )
 
+        writer.add_scalar(
+            "Eval/Perplexity",
+            perplexity.item(),
+            step
+        )
+
         print(
             f"Step {step:04d} | "
             f"Loss {total_loss.item():.6f} | "
             f"Recon {recon_loss.item():.6f} | "
+            f"Masked {masked_loss.item():.6f} | "
+            f"Full {full_loss.item():.6f} | "
+            f"Embed {embedding_loss.item():.6f} | "
             f"Perplexity {perplexity.item():.4f}"
         )
 
@@ -391,9 +460,13 @@ with torch.no_grad():
 
 print("==== Evaluation Finished ====")
 print(f"Average Loss: {np.mean(losses):.6f}")
-print(f"Average Reconstruction Loss: {np.mean(recon_losses):.6f}")
+print(f"Average Masked Loss: {np.mean(masked_losses):.6f}")
+print(f"Average Full Loss: {np.mean(full_losses):.6f}")
+print(f"Average Embedding Loss: {np.mean(embedding_losses):.6f}")
 print(f"Average Perplexity: {np.mean(perplexities):.6f}")
+
 print("Saved to:", save_dir)
 print("Save dir absolute:", os.path.abspath(save_dir))
+print("TensorBoard logdir:", f"/app/runs/eval_masked_{checkpoint_name}_{eval_time}")
 
 writer.close()
