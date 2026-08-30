@@ -3,6 +3,7 @@ from datetime import datetime
 
 import numpy as np
 import torch
+import torch.nn.functional as F
 
 from torch.utils.data import Dataset, DataLoader
 from torchvision import transforms
@@ -26,27 +27,23 @@ print("Using device:", device)
 
 
 # =============================
-# Training Stage
-# =============================
-
-# 1: 先训练普通 full reconstruction
-# 2: 加载 Stage 1 后做 light masked fine-tuning
-training_stage = 2
-
-
-# =============================
-# Common Training Parameters
+# Training Parameters
 # =============================
 
 batch_size = 16
-learning_rate = 1e-4
+n_epochs = 100
+
+# SVDD fine-tuning 建议稍微小一点
+learning_rate = 5e-5
+
 resize = 256
-save = True
+
+filename = "vqvae_ct_lungwindow_stage3_global_svdd"
 
 
 # =============================
 # Model Parameters
-# 必须和 VQVAE 一致
+# 必须和 Stage2_v2 一致
 # =============================
 
 n_hiddens = 128
@@ -59,30 +56,10 @@ beta = 0.25
 
 
 # =============================
-# Stage-specific Parameters
+# SVDD Parameters
 # =============================
 
-if training_stage == 1:
-
-    filename = "vqvae_ct_lungwindow_stage1_full"
-
-    n_epochs = 50
-
-    mask_ratio = 0.0
-    block_size = 4
-
-elif training_stage == 2:
-
-    filename = "vqvae_ct_lungwindow_stage2_lightmask_v2"
-
-    n_epochs = 20
-
-    # 轻量 mask，不能太强
-    mask_ratio = 0.01
-    block_size = 4
-
-else:
-    raise ValueError("training_stage must be 1 or 2")
+lambda_svdd = 0.001
 
 
 # =============================
@@ -95,6 +72,15 @@ val_data_dir = "/app/data/validation"
 result_dir = "/app/results"
 os.makedirs(result_dir, exist_ok=True)
 
+# Stage2_v2 模型
+pretrained_model_path = "/app/results/vqvae_data_vqvae_ct_lungwindow_stage2_lightmask_v2_final.pth"
+
+# 你刚刚计算出来的 center
+# 如果你的文件名不同，改这里
+center_path = "/app/results/svdd_center_global_stage2_v2.pth"
+# center_path = "/app/results/svdd_center_global_stage2_v2_train.pth"
+# center_path = "/app/results/svdd_center_global_stage2_v2_val.pth"
+
 run_name = datetime.now().strftime("%Y%m%d_%H%M%S")
 
 writer = SummaryWriter(
@@ -103,7 +89,8 @@ writer = SummaryWriter(
 
 print("Run name:", run_name)
 print("Filename:", filename)
-print("Training stage:", training_stage)
+print("Pretrained model:", pretrained_model_path)
+print("Center path:", center_path)
 print("TensorBoard logdir:", f"./runs/{filename}_{run_name}")
 
 
@@ -141,6 +128,7 @@ class DICOMDataset(Dataset):
 
         # =============================
         # HU conversion
+        # 必须和 Stage1 / Stage2_v2 一致
         # =============================
 
         slope = float(getattr(ds, "RescaleSlope", 1.0))
@@ -150,6 +138,7 @@ class DICOMDataset(Dataset):
 
         # =============================
         # Lung window
+        # 必须和训练一致
         # =============================
 
         window_min = -1000.0
@@ -168,7 +157,6 @@ class DICOMDataset(Dataset):
 
 # =============================
 # Transform
-# 必须和 eval 一致
 # =============================
 
 transform = transforms.Compose([
@@ -229,24 +217,38 @@ model = VQVAE(
 
 
 # =============================
-# Load Stage 1 checkpoint for Stage 2
+# Load Stage2_v2 checkpoint
 # =============================
 
-if training_stage == 2:
+checkpoint = torch.load(
+    pretrained_model_path,
+    map_location=device
+)
 
-    stage1_path = "/app/results/vqvae_data_vqvae_ct_lungwindow_stage1_full_final.pth"
+if "model" in checkpoint:
+    model.load_state_dict(checkpoint["model"])
+else:
+    model.load_state_dict(checkpoint)
 
-    checkpoint = torch.load(
-        stage1_path,
-        map_location=device
-    )
+print("Loaded pretrained model:", pretrained_model_path)
 
-    if "model" in checkpoint:
-        model.load_state_dict(checkpoint["model"])
-    else:
-        model.load_state_dict(checkpoint)
 
-    print("Loaded Stage 1 model:", stage1_path)
+# =============================
+# Load SVDD center
+# =============================
+
+center_ckpt = torch.load(
+    center_path,
+    map_location=device
+)
+
+center = center_ckpt["center"].to(device)
+
+# center: [64]
+print("Loaded center:", center_path)
+print("Center shape:", center.shape)
+print("Center mean:", center.mean().item())
+print("Center std:", center.std().item())
 
 
 optimizer = torch.optim.Adam(
@@ -281,9 +283,9 @@ def save_checkpoint(model, optimizer, epoch, loss, name):
             "n_embeddings": n_embeddings,
             "beta": beta,
 
-            "mask_ratio": mask_ratio,
-            "block_size": block_size,
-            "training_stage": training_stage,
+            "lambda_svdd": lambda_svdd,
+            "center_path": center_path,
+            "pretrained_model_path": pretrained_model_path,
             "filename": filename,
         },
         save_path
@@ -293,90 +295,121 @@ def save_checkpoint(model, optimizer, epoch, loss, name):
 
 
 # =============================
-# Helper: masked L1 loss
+# Helper: forward with z_q
 # =============================
 
-def masked_l1_loss(x_hat, x, image_mask):
+def forward_with_zq(model, x):
+    """
+    x: [B,1,256,256]
 
-    abs_error = torch.abs(x_hat - x)
-    masked_error = abs_error * image_mask
+    returns:
+        embedding_loss
+        x_hat
+        perplexity
+        q_distance_map
+        z_q: [B,C,64,64]
+    """
 
-    loss = masked_error.sum() / (
-        image_mask.sum() + 1e-8
+    # Encoder
+    z_e = model.encoder(x)
+
+    # 1x1 projection
+    z_e = model.pre_quantization_conv(z_e)
+
+    # Position bias
+    if (
+        model.pos_bias.shape[2] == z_e.shape[2]
+        and model.pos_bias.shape[3] == z_e.shape[3]
+    ):
+        z_e = z_e + model.pos_bias
+    else:
+        pos_bias = F.interpolate(
+            model.pos_bias,
+            size=z_e.shape[-2:],
+            mode="bilinear",
+            align_corners=False
+        )
+        z_e = z_e + pos_bias
+
+    # Vector quantization
+    (
+        embedding_loss,
+        z_q,
+        perplexity,
+        _,
+        _,
+        q_distance_map
+    ) = model.vector_quantization(z_e)
+
+    # Decoder
+    x_hat = model.decoder(z_q)
+
+    return (
+        embedding_loss,
+        x_hat,
+        perplexity,
+        q_distance_map,
+        z_q
     )
 
-    return loss
-
 
 # =============================
-# Helper: forward + loss
+# Helper: compute losses
 # =============================
 
-def forward_and_compute_loss(model, x):
+def compute_losses(model, x, center):
 
-    if training_stage == 1:
+    (
+        embedding_loss,
+        x_hat,
+        perplexity,
+        q_distance_map,
+        z_q
+    ) = forward_with_zq(
+        model,
+        x
+    )
 
-        embedding_loss, x_hat, perplexity, q_distance_map = model(
-            x,
-            mask=False
+    # =============================
+    # Full reconstruction loss
+    # =============================
+
+    full_loss = torch.mean(
+        torch.abs(x_hat - x)
+    )
+
+    # =============================
+    # Global SVDD loss
+    # z_global: [B, C]
+    # center:   [C]
+    # =============================
+
+    z_global = z_q.mean(
+        dim=[2, 3]
+    )
+
+    svdd_loss = torch.mean(
+        torch.sum(
+            (z_global - center) ** 2,
+            dim=1
         )
+    )
 
-        image_mask = torch.zeros_like(x)
-
-        full_loss = torch.mean(
-            torch.abs(x_hat - x)
-        )
-
-        masked_loss = torch.tensor(
-            0.0,
-            device=x.device
-        )
-
-        recon_loss = full_loss
-
-    elif training_stage == 2:
-
-        (
-            embedding_loss,
-            x_hat,
-            perplexity,
-            q_distance_map,
-            image_mask
-        ) = model(
-            x,
-            mask=True,
-            mask_ratio=mask_ratio,
-            block_size=block_size,
-            return_mask=True
-        )
-
-        full_loss = torch.mean(
-            torch.abs(x_hat - x)
-        )
-
-        masked_loss = masked_l1_loss(
-            x_hat,
-            x,
-            image_mask
-        )
-
-        # Stage 2:
-        # full reconstruction 为主
-        # masked reconstruction 只是轻量辅助
-        recon_loss = full_loss + 0.03 * masked_loss
-
-    loss = recon_loss + embedding_loss
+    loss = (
+        full_loss
+        + embedding_loss
+        + lambda_svdd * svdd_loss
+    )
 
     return (
         loss,
-        recon_loss,
         full_loss,
-        masked_loss,
         embedding_loss,
+        svdd_loss,
         perplexity,
         x_hat,
-        image_mask,
-        q_distance_map
+        q_distance_map,
+        z_q
     )
 
 
@@ -387,7 +420,7 @@ def forward_and_compute_loss(model, x):
 best_val_loss = float("inf")
 global_step = 0
 
-print("Start training...")
+print("Start Stage3 Global SVDD training...")
 
 for epoch in range(n_epochs):
 
@@ -398,10 +431,9 @@ for epoch in range(n_epochs):
     model.train()
 
     train_losses = []
-    train_recon_losses = []
     train_full_losses = []
-    train_masked_losses = []
     train_embedding_losses = []
+    train_svdd_losses = []
     train_perplexities = []
 
     for batch_idx, x in enumerate(train_loader):
@@ -412,24 +444,26 @@ for epoch in range(n_epochs):
 
         (
             loss,
-            recon_loss,
             full_loss,
-            masked_loss,
             embedding_loss,
+            svdd_loss,
             perplexity,
             x_hat,
-            image_mask,
-            q_distance_map
-        ) = forward_and_compute_loss(model, x)
+            q_distance_map,
+            z_q
+        ) = compute_losses(
+            model,
+            x,
+            center
+        )
 
         loss.backward()
         optimizer.step()
 
         train_losses.append(loss.item())
-        train_recon_losses.append(recon_loss.item())
         train_full_losses.append(full_loss.item())
-        train_masked_losses.append(masked_loss.item())
         train_embedding_losses.append(embedding_loss.item())
+        train_svdd_losses.append(svdd_loss.item())
         train_perplexities.append(perplexity.item())
 
         # =============================
@@ -443,26 +477,26 @@ for epoch in range(n_epochs):
         )
 
         writer.add_scalar(
-            "Train/Reconstruction_Loss",
-            recon_loss.item(),
-            global_step
-        )
-
-        writer.add_scalar(
             "Train/Full_Loss",
             full_loss.item(),
             global_step
         )
 
         writer.add_scalar(
-            "Train/Masked_Loss",
-            masked_loss.item(),
+            "Train/Embedding_Loss",
+            embedding_loss.item(),
             global_step
         )
 
         writer.add_scalar(
-            "Train/Embedding_Loss",
-            embedding_loss.item(),
+            "Train/SVDD_Loss",
+            svdd_loss.item(),
+            global_step
+        )
+
+        writer.add_scalar(
+            "Train/Lambda_SVDD_x_Loss",
+            lambda_svdd * svdd_loss.item(),
             global_step
         )
 
@@ -474,9 +508,6 @@ for epoch in range(n_epochs):
 
         # =============================
         # TensorBoard Images
-        #
-        # 行顺序：
-        # input / reconstruction / mask / masked_diff / full_diff
         # =============================
 
         if global_step % 200 == 0:
@@ -484,14 +515,11 @@ for epoch in range(n_epochs):
             n_show = min(8, x.size(0))
 
             full_diff = torch.abs(x - x_hat)
-            masked_diff = full_diff * image_mask
 
             grid = vutils.make_grid(
                 torch.cat([
                     x[:n_show],
                     x_hat[:n_show],
-                    image_mask[:n_show],
-                    masked_diff[:n_show],
                     full_diff[:n_show]
                 ], dim=0),
                 nrow=n_show,
@@ -499,31 +527,29 @@ for epoch in range(n_epochs):
             )
 
             writer.add_image(
-                "Train/Input_Recon_Mask_MaskedDiff_FullDiff",
+                "Train/Input_Recon_FullDiff",
                 grid,
                 global_step
             )
 
         if batch_idx % 50 == 0:
-
             print(
                 f"Epoch [{epoch + 1}/{n_epochs}] "
                 f"Batch [{batch_idx}/{len(train_loader)}] "
                 f"Loss: {loss.item():.6f} "
-                f"Recon: {recon_loss.item():.6f} "
                 f"Full: {full_loss.item():.6f} "
-                f"Masked: {masked_loss.item():.6f} "
                 f"Embed: {embedding_loss.item():.6f} "
+                f"SVDD: {svdd_loss.item():.6f} "
+                f"LambdaSVDD: {(lambda_svdd * svdd_loss.item()):.6f} "
                 f"Perplexity: {perplexity.item():.4f}"
             )
 
         global_step += 1
 
     avg_train_loss = np.mean(train_losses)
-    avg_train_recon_loss = np.mean(train_recon_losses)
     avg_train_full_loss = np.mean(train_full_losses)
-    avg_train_masked_loss = np.mean(train_masked_losses)
     avg_train_embedding_loss = np.mean(train_embedding_losses)
+    avg_train_svdd_loss = np.mean(train_svdd_losses)
     avg_train_perplexity = np.mean(train_perplexities)
 
     # =============================
@@ -533,10 +559,9 @@ for epoch in range(n_epochs):
     model.eval()
 
     val_losses = []
-    val_recon_losses = []
     val_full_losses = []
-    val_masked_losses = []
     val_embedding_losses = []
+    val_svdd_losses = []
     val_perplexities = []
 
     with torch.no_grad():
@@ -547,21 +572,23 @@ for epoch in range(n_epochs):
 
             (
                 loss,
-                recon_loss,
                 full_loss,
-                masked_loss,
                 embedding_loss,
+                svdd_loss,
                 perplexity,
                 x_hat,
-                image_mask,
-                q_distance_map
-            ) = forward_and_compute_loss(model, x)
+                q_distance_map,
+                z_q
+            ) = compute_losses(
+                model,
+                x,
+                center
+            )
 
             val_losses.append(loss.item())
-            val_recon_losses.append(recon_loss.item())
             val_full_losses.append(full_loss.item())
-            val_masked_losses.append(masked_loss.item())
             val_embedding_losses.append(embedding_loss.item())
+            val_svdd_losses.append(svdd_loss.item())
             val_perplexities.append(perplexity.item())
 
             if val_idx == 0:
@@ -569,14 +596,11 @@ for epoch in range(n_epochs):
                 n_show = min(8, x.size(0))
 
                 full_diff = torch.abs(x - x_hat)
-                masked_diff = full_diff * image_mask
 
                 grid = vutils.make_grid(
                     torch.cat([
                         x[:n_show],
                         x_hat[:n_show],
-                        image_mask[:n_show],
-                        masked_diff[:n_show],
                         full_diff[:n_show]
                     ], dim=0),
                     nrow=n_show,
@@ -584,16 +608,15 @@ for epoch in range(n_epochs):
                 )
 
                 writer.add_image(
-                    "Val/Input_Recon_Mask_MaskedDiff_FullDiff",
+                    "Val/Input_Recon_FullDiff",
                     grid,
                     epoch
                 )
 
     avg_val_loss = np.mean(val_losses)
-    avg_val_recon_loss = np.mean(val_recon_losses)
     avg_val_full_loss = np.mean(val_full_losses)
-    avg_val_masked_loss = np.mean(val_masked_losses)
     avg_val_embedding_loss = np.mean(val_embedding_losses)
+    avg_val_svdd_loss = np.mean(val_svdd_losses)
     avg_val_perplexity = np.mean(val_perplexities)
 
     # =============================
@@ -607,26 +630,20 @@ for epoch in range(n_epochs):
     )
 
     writer.add_scalar(
-        "Epoch/Train_Reconstruction_Loss",
-        avg_train_recon_loss,
-        epoch
-    )
-
-    writer.add_scalar(
         "Epoch/Train_Full_Loss",
         avg_train_full_loss,
         epoch
     )
 
     writer.add_scalar(
-        "Epoch/Train_Masked_Loss",
-        avg_train_masked_loss,
+        "Epoch/Train_Embedding_Loss",
+        avg_train_embedding_loss,
         epoch
     )
 
     writer.add_scalar(
-        "Epoch/Train_Embedding_Loss",
-        avg_train_embedding_loss,
+        "Epoch/Train_SVDD_Loss",
+        avg_train_svdd_loss,
         epoch
     )
 
@@ -643,26 +660,20 @@ for epoch in range(n_epochs):
     )
 
     writer.add_scalar(
-        "Epoch/Val_Reconstruction_Loss",
-        avg_val_recon_loss,
-        epoch
-    )
-
-    writer.add_scalar(
         "Epoch/Val_Full_Loss",
         avg_val_full_loss,
         epoch
     )
 
     writer.add_scalar(
-        "Epoch/Val_Masked_Loss",
-        avg_val_masked_loss,
+        "Epoch/Val_Embedding_Loss",
+        avg_val_embedding_loss,
         epoch
     )
 
     writer.add_scalar(
-        "Epoch/Val_Embedding_Loss",
-        avg_val_embedding_loss,
+        "Epoch/Val_SVDD_Loss",
+        avg_val_svdd_loss,
         epoch
     )
 
@@ -675,16 +686,14 @@ for epoch in range(n_epochs):
     print(
         f"\nEpoch [{epoch + 1}/{n_epochs}] Finished\n"
         f"Train Loss: {avg_train_loss:.6f} | "
-        f"Train Recon: {avg_train_recon_loss:.6f} | "
         f"Train Full: {avg_train_full_loss:.6f} | "
-        f"Train Masked: {avg_train_masked_loss:.6f} | "
         f"Train Embed: {avg_train_embedding_loss:.6f} | "
+        f"Train SVDD: {avg_train_svdd_loss:.6f} | "
         f"Train Perplexity: {avg_train_perplexity:.4f}\n"
         f"Val Loss: {avg_val_loss:.6f} | "
-        f"Val Recon: {avg_val_recon_loss:.6f} | "
         f"Val Full: {avg_val_full_loss:.6f} | "
-        f"Val Masked: {avg_val_masked_loss:.6f} | "
         f"Val Embed: {avg_val_embedding_loss:.6f} | "
+        f"Val SVDD: {avg_val_svdd_loss:.6f} | "
         f"Val Perplexity: {avg_val_perplexity:.4f}\n"
     )
 
@@ -705,10 +714,10 @@ for epoch in range(n_epochs):
         )
 
     # =============================
-    # Save every 10 epochs
+    # Save every 5 epochs
     # =============================
 
-    if (epoch + 1) % 10 == 0:
+    if (epoch + 1) % 5 == 0:
 
         save_checkpoint(
             model,
@@ -733,7 +742,7 @@ save_checkpoint(
 
 writer.close()
 
-print("Training Finished.")
+print("Stage3 Global SVDD Training Finished.")
 print("Best Val Loss:", best_val_loss)
 print("Results saved to:", result_dir)
 print("TensorBoard logdir:", f"./runs/{filename}_{run_name}")
